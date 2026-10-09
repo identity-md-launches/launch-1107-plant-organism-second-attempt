@@ -1,5 +1,9 @@
 # PLANT ORGANISM tests
 
+The existing launch origin is Sintra: Its gardens bring native and exotic trees together on
+forested hills. Its cell is `10223578`, with centre `38.875, -9.375`; the origin regression
+derives that cell from the documented coordinates and round-trips through the centre.
+
 Run entirely offline with the repository's pinned compiler and vendored libraries:
 
 ```sh
@@ -45,8 +49,23 @@ destination through deposits, withdrawals, callbacks, retries, and settlement. A
 death, exits every position, funds any remaining oracle deficit, claims all debts, and redeems all
 remaining supply. The existing
 `PlantInvariant.t.sol` additionally exercises repeated complete weather days and lazy reward
-checkpoints. The new invariant runs 256 sequences of 96 calls; arithmetic fuzz tests run 1,000
+checkpoints. The state-machine invariant runs 256 sequences of 96 calls; arithmetic fuzz tests run 1,000
 cases via inline configuration.
+
+`PlantRewardOwnershipInvariant.t.sol` independently assigns each day's gardening pool to each
+eligible holder in an eager ledger, without reading the implementation's positions, reward index,
+or activation checkpoints. Across 256 sequences of 96 calls it compares exact fractional liabilities,
+individual credits and actual payouts through lazy activation, withdrawals, moves, third-party
+checkpoints, duplicate historical claim cells, default claims and rejected payments. Every sequence
+starts with rewards in three cells and two moves, and ends by withdrawing all stake and rewards
+after death. The model applies the documented checkpoint dust rounding; it does not assume that
+checkpointing preserves fractions below one IMD base unit.
+
+`PlantFailureAtomicity.t.sol` verifies that failed deposits, withdrawals and redemptions roll back
+checkpoints, voting power, allowances and custody; a token returning false defers only the affected
+holder's claim; and an undercharging Intake rolls back the caller's advance and nested transfers.
+A 1,000-case property rejects a fee cap one unit below the required advance, then accepts the exact
+cap while preserving backing and gardener reserves.
 
 `GasAndDeployment.t.sol` tests deployment constraints and cold settlement with 24 sips, a move,
 fee repayment, or 129 eligible holders. Callback mocks forward an actual 200,000 gas stipend;
