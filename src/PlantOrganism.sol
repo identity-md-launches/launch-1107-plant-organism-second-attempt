@@ -70,28 +70,33 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     }
     Pending public pending;
 
+    // Stake is batched by the UTC day it was parked. A batch parked on day T is eligible for
+    // every day after T, so it matures once day T itself has settled, never earlier.
     struct CellRewards {
         uint256 active;
-        uint256 queued;
-        uint256 epoch;
         uint256 rewardPerToken;
+        uint32 rolledDay;
+        uint32 lastQueuedDay;
     }
 
     struct Position {
         uint256 active;
-        uint256 queued;
-        uint256 epoch;
         uint256 paid;
+        uint32 rolledDay;
+        uint32 lastQueuedDay;
     }
     mapping(uint32 => CellRewards) public cellRewards;
     mapping(uint32 => mapping(address => Position)) public positions;
-    mapping(uint32 => mapping(uint256 => uint256)) public activationCheckpoint;
+    mapping(uint32 => mapping(uint32 => uint256)) public queued;
+    mapping(uint32 => mapping(address => mapping(uint32 => uint256))) public queuedOf;
+    mapping(uint32 => mapping(uint32 => uint256)) public activationCheckpoint;
     mapping(address => uint32) public lastParkedCell;
     // Exact fractional reward liabilities, before each account rounds down on checkpoint.
     uint256 public gardenerPoints;
     mapping(address => uint256) public credits;
     uint256 public creditTotal;
     mapping(address => uint256) public feeAdvances;
+    mapping(address => uint256) public lockedAdvances;
     mapping(address => uint256) public feeUnlockEpoch;
     uint256 public feeAdvanceTotal;
 
@@ -237,8 +242,11 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         if (amount == 0) revert InvalidAmount();
         _checkpoint(cell, msg.sender);
         _pullExact(PLANT, msg.sender, amount);
-        positions[cell][msg.sender].queued += amount;
-        cellRewards[cell].queued += amount;
+        uint32 day = today();
+        queuedOf[cell][msg.sender][day] += amount;
+        queued[cell][day] += amount;
+        positions[cell][msg.sender].lastQueuedDay = day;
+        cellRewards[cell].lastQueuedDay = day;
         parked[cell][msg.sender] += amount;
         parkedTotal[cell] += amount;
         totalParked += amount;
@@ -253,11 +261,18 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         _checkpoint(cell, msg.sender);
         Position storage p = positions[cell][msg.sender];
         CellRewards storage c = cellRewards[cell];
-        uint256 queued = Math.min(amount, p.queued);
-        p.queued -= queued;
-        c.queued -= queued;
-        p.active -= amount - queued;
-        c.active -= amount - queued;
+        // Fresh deposits leave first, newest day first; the rest comes out of eligible stake.
+        uint256 remaining = amount;
+        for (uint32 d = p.lastQueuedDay; remaining != 0 && d > p.rolledDay; --d) {
+            uint256 fresh = queuedOf[cell][msg.sender][d];
+            if (fresh == 0) continue;
+            uint256 take = Math.min(fresh, remaining);
+            queuedOf[cell][msg.sender][d] = fresh - take;
+            queued[cell][d] -= take;
+            remaining -= take;
+        }
+        p.active -= remaining;
+        c.active -= remaining;
         parked[cell][msg.sender] -= amount;
         parkedTotal[cell] -= amount;
         totalParked -= amount;
@@ -268,6 +283,8 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     function challenge(uint32 cell) external nonReentrant {
         _aliveBound();
         WeatherQuestion.validate(cell);
+        // Nomination rolls the cell so every later settle matures at most one day of it.
+        _rollCell(cell);
         _challenge(cell);
     }
 
@@ -291,9 +308,12 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
             uint256 advance = price - available;
             if (advance > maxAdvance) revert AdvanceTooLarge();
             _pullExact(IMD, msg.sender, advance);
+            // Only this advance locks until the next successful settle; an earlier advance that
+            // already unlocked stays payable.
+            lockedAdvances[msg.sender] = (epoch < feeUnlockEpoch[msg.sender] ? lockedAdvances[msg.sender] : 0) + advance;
+            feeUnlockEpoch[msg.sender] = epoch + 1;
             feeAdvances[msg.sender] += advance;
             feeAdvanceTotal += advance;
-            feeUnlockEpoch[msg.sender] = epoch + 1;
             emit Advanced(msg.sender, advance);
         }
         uint256 beforeBalance = IMD.balanceOf(address(this));
@@ -364,16 +384,22 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         _settle(false);
     }
 
+    /// @notice Settles exactly the named day; a catch-up that would pass it reverts.
     function settle(uint32 day) external nonReentrant {
         if (day != lastSettledDay + 1) revert WrongDay();
-        _settle(false);
+        _settle(false, day);
     }
 
     function _settle(bool timedOut) private {
+        _settle(timedOut, 0);
+    }
+
+    function _settle(bool timedOut, uint32 exactDay) private {
         uint32 day = lastSettledDay + 1;
         if (day >= today()) revert DayNotEnded();
         if (hook == address(0) || day <= bindDay) {
             uint32 end = hook == address(0) ? today() - 1 : uint32(Math.min(today() - 1, bindDay));
+            if (exactDay != 0 && end != exactDay) revert WrongDay();
             lastSettledDay = end;
             emit EmptyCatchUp(day, end);
             return;
@@ -429,25 +455,36 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         water = uint8(wet);
     }
 
-    /// @notice stake[cell] = PLANT parked since the previous successful settle.
-    /// New parks count from the next settle; unparked stake drops out immediately.
-    /// Nomination, READ, its 5% threshold and the gardener pool all use this rule.
+    /// @notice stake[cell] = PLANT parked behind the cell since the previous successful settle:
+    /// a deposit made on UTC day T votes and earns for every day after T, so it matures once day
+    /// T has settled and never for a day that ended before it was parked. Unparked stake drops
+    /// out at once. Nomination, READ, its 5% threshold and the gardener pool all use this rule.
     function votingStake(uint32 cell) public view returns (uint256) {
         CellRewards storage c = cellRewards[cell];
-        // Mirror _rollCell without writing. Queued deposits mature only after a successful
-        // settle advances epoch; withdrawals already remove active stake in unpark.
-        uint256 active = c.active + (c.epoch < epoch ? c.queued : 0);
+        // Mirror _rollCell without writing; withdrawals already removed their stake in unpark.
+        uint256 active = c.active;
+        uint32 to = uint32(Math.min(c.lastQueuedDay, _matureThrough()));
+        for (uint32 d = c.rolledDay + 1; d <= to; ++d) {
+            active += queued[cell][d];
+        }
         return Math.min(active, parkedTotal[cell]);
+    }
+
+    /// @dev Latest park day whose stake is eligible for the next settle. Nothing is eligible
+    /// before the first full day after bind has settled, so bind-day deposits wait for it.
+    function _matureThrough() private view returns (uint32) {
+        if (hook == address(0)) return 0;
+        uint32 last = lastSettledDay;
+        return last > bindDay ? last : bindDay - 1;
     }
 
     function _read(uint32 candidate) private returns (bool moved) {
         uint32 current = location;
+        if (candidate == 0 || candidate == current) return false;
+        _rollCell(candidate);
         uint256 candidateStake = votingStake(candidate);
         uint256 currentStake = votingStake(current);
-        if (
-            candidate != 0 && candidate != current && candidateStake > currentStake
-                && candidateStake >= Math.ceilDiv(PLANT.totalSupply() - burned, 20)
-        ) {
+        if (candidateStake > currentStake && candidateStake >= Math.ceilDiv(PLANT.totalSupply() - burned, 20)) {
             location = candidate;
             challenger = 0;
             emit Moved(current, candidate);
@@ -455,16 +492,22 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         }
     }
 
+    /// @dev Matures every park day that has settled. A cell rolled at each settle matures at
+    /// most one day per settle; park days per cell are bounded by the 30-day death clock.
     function _rollCell(uint32 cell) private {
         CellRewards storage c = cellRewards[cell];
-        if (c.epoch < epoch) {
-            if (c.queued != 0) {
-                activationCheckpoint[cell][c.epoch] = c.rewardPerToken;
-                c.active += c.queued;
-                c.queued = 0;
+        uint32 through = _matureThrough();
+        if (c.rolledDay >= through) return;
+        uint32 to = uint32(Math.min(c.lastQueuedDay, through));
+        for (uint32 d = c.rolledDay + 1; d <= to; ++d) {
+            uint256 amount = queued[cell][d];
+            if (amount != 0) {
+                activationCheckpoint[cell][d] = c.rewardPerToken;
+                c.active += amount;
+                delete queued[cell][d];
             }
-            c.epoch = epoch;
         }
+        c.rolledDay = through;
     }
 
     function _distribute(uint32 cell, uint256 pool) private {
@@ -489,12 +532,19 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         Position storage p = positions[cell][holder];
         uint256 rpt = cellRewards[cell].rewardPerToken;
         uint256 points = p.active * (rpt - p.paid);
-        if (p.epoch < epoch && p.queued != 0) {
-            points += p.queued * (rpt - activationCheckpoint[cell][p.epoch]);
-            p.active += p.queued;
-            p.queued = 0;
+        uint32 through = _matureThrough();
+        if (p.rolledDay < through) {
+            uint32 to = uint32(Math.min(p.lastQueuedDay, through));
+            for (uint32 d = p.rolledDay + 1; d <= to; ++d) {
+                uint256 amount = queuedOf[cell][holder][d];
+                if (amount != 0) {
+                    points += amount * (rpt - activationCheckpoint[cell][d]);
+                    p.active += amount;
+                    delete queuedOf[cell][holder][d];
+                }
+            }
+            p.rolledDay = through;
         }
-        p.epoch = epoch;
         p.paid = rpt;
         if (points != 0) {
             uint256 oldReserve = gardenerReserve();
@@ -531,11 +581,13 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     function _pay(address holder) private {
         uint256 credit = credits[holder];
         uint256 advance;
-        if (epoch >= feeUnlockEpoch[holder] || dead) {
+        uint256 locked = epoch < feeUnlockEpoch[holder] && !dead ? lockedAdvances[holder] : 0;
+        uint256 unlocked = feeAdvances[holder] - locked;
+        if (unlocked != 0) {
             // Reserved backing and gardener/bounty claims never finance oracle fees.
             uint256 held = IMD.balanceOf(address(this));
             uint256 senior = backing + gardenerReserve() + creditTotal;
-            if (held > senior) advance = Math.min(feeAdvances[holder], held - senior);
+            if (held > senior) advance = Math.min(unlocked, held - senior);
         }
         if (credit + advance == 0) return;
         credits[holder] = 0;
@@ -561,6 +613,8 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         uint256 currentFloor = floor();
         payout = Math.mulDiv(amount, currentFloor, SCALE);
         if (!dead) payout = Math.mulDiv(payout, 9, 10);
+        // Surrendered PLANT is never returned, so a redemption that pays nothing is refused.
+        if (payout == 0) revert InvalidAmount();
         _pullExact(PLANT, msg.sender, amount);
         burned += amount;
         backing -= payout;

@@ -69,7 +69,13 @@ contract PlantVotingRevisionTest is PlantTestBase {
         _deliver(0, 0, true);
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL);
+        // Parked on day START+3, after day START+2 ended: eligible from day START+4 only.
         organism.challenge(THIRD);
+        assertEq(organism.votingStake(THIRD), 0);
+        _weather(0, 0);
+        assertEq(organism.location(), ORIGIN_CELL);
+        organism.challenge(THIRD);
+        assertEq(organism.votingStake(THIRD), 200 ether);
         _weather(0, 0);
         assertEq(organism.location(), THIRD);
     }
@@ -87,6 +93,10 @@ contract PlantVotingRevisionTest is PlantTestBase {
         assertEq(organism.votingStake(OTHER), 1 ether);
         _deliver(0, 0, true);
         organism.settle();
+        assertEq(organism.location(), ORIGIN_CELL);
+        // The redeposit was made on day START+3; it votes once that day has settled.
+        assertEq(organism.votingStake(OTHER), 1 ether);
+        _weather(0, 0);
         assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.votingStake(OTHER), 200 ether);
         organism.challenge(OTHER);
@@ -141,10 +151,15 @@ contract PlantVotingRevisionTest is PlantTestBase {
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.lastSettledDay(), START + 2);
-        assertEq(organism.votingStake(OTHER), 250 ether);
+        // Day START+3 and START+4 deposits mature one day at a time as those days settle.
+        assertEq(organism.votingStake(OTHER), 50 ether);
         organism.challenge(OTHER);
         _weather(0, 0);
+        assertEq(organism.location(), ORIGIN_CELL);
+        assertEq(organism.votingStake(OTHER), 200 ether);
+        _weather(0, 0);
         assertEq(organism.location(), OTHER);
+        assertEq(organism.votingStake(OTHER), 250 ether);
         _conservation();
     }
 
@@ -186,6 +201,10 @@ contract PlantVotingRevisionTest is PlantTestBase {
         _deliver(0, 0, true);
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL);
+        // Carol parked on day START+3: her stake counts once that day has settled.
+        assertEq(organism.votingStake(OTHER), 50 ether);
+        _weather(0, 0);
+        assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.votingStake(OTHER), 150 ether);
         _weather(0, 0);
         assertEq(organism.location(), OTHER);
@@ -204,6 +223,8 @@ contract PlantVotingRevisionTest is PlantTestBase {
         _deliver(0, 0, true);
         organism.settle();
         assertEq(organism.location(), retained > 100 ether ? OTHER : ORIGIN_CELL);
+        assertEq(organism.votingStake(OTHER), retained, "day START+3 deposit counted before that day settled");
+        _weather(0, 0);
         assertEq(organism.votingStake(OTHER), 250 ether - withdrawn);
         _conservation();
     }
@@ -220,7 +241,9 @@ contract PlantVotingRevisionTest is PlantTestBase {
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL, "post-request deposits cannot break a voting tie");
         _weather(0, 0);
-        assertEq(organism.location(), OTHER, "retained deposits vote on the following request");
+        assertEq(organism.location(), ORIGIN_CELL, "day START+3 deposits voted for day START+3");
+        _weather(0, 0);
+        assertEq(organism.location(), OTHER, "retained deposits vote once their park day has settled");
         _conservation();
     }
 }

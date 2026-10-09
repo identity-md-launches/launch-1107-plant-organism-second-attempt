@@ -252,6 +252,11 @@ contract PlantAdversarialTest is PlantTestBase {
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.challenger(), 0);
+        // Parked on day START+3 while day START+2 was pending: it cannot be nominated until
+        // day START+3 itself has settled.
+        organism.challenge(OTHER);
+        assertEq(organism.challenger(), 0);
+        _weather(0, 0);
         organism.challenge(OTHER);
         assertEq(organism.challenger(), OTHER);
         _weather(0, 0);

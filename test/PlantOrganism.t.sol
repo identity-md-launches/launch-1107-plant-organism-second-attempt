@@ -746,15 +746,37 @@ contract PlantRewardsTest is PlantTestBase {
     }
 
     function test_nonExactTokenTransfersRejected() public {
+        _withGardeners();
+        _weather(1, 0); // Some backing, so the redemption below is refused for its transfer only.
         plant.setTransferFee(100);
         vm.expectRevert(PlantOrganism.NonExactTransfer.selector);
-        vm.prank(alice);
+        vm.prank(bob);
         organism.park(ORIGIN_CELL, 100 ether);
-        assertEq(organism.totalParked(), 0);
+        assertEq(organism.totalParked(), 100 ether);
+        assertGt(organism.floor(), 0);
         vm.expectRevert(PlantOrganism.NonExactTransfer.selector);
-        vm.prank(alice);
+        vm.prank(bob);
         organism.redeem(100 ether);
         assertEq(organism.burned(), 0);
+    }
+
+    function test_redeemThatPaysNothingIsRefusedAndKeepsPlant() public {
+        assertEq(organism.floor(), 0);
+        vm.expectRevert(PlantOrganism.InvalidAmount.selector);
+        vm.prank(alice);
+        organism.redeem(500 ether);
+        assertEq(organism.burned(), 0);
+        assertEq(plant.balanceOf(alice), 600 ether);
+        _withGardeners();
+        _weather(1, 0);
+        assertGt(organism.floor(), 0);
+        // A dust amount whose quote truncates to zero is refused the same way.
+        vm.expectRevert(PlantOrganism.InvalidAmount.selector);
+        vm.prank(bob);
+        organism.redeem(1);
+        vm.prank(bob);
+        assertGt(organism.redeem(1 ether), 0);
+        _conservation();
     }
 
     function test_reentrancyFromTokensAndIntakeBlocked() public {
@@ -808,6 +830,7 @@ contract PlantRewardsTest is PlantTestBase {
         _weather(sun, 0);
         uint256 quote = organism.floor();
         uint256 amount = bound(redemption, 1, 300 ether);
+        if (amount * quote / 1e18 * 9 / 10 == 0) vm.expectRevert(PlantOrganism.InvalidAmount.selector);
         vm.prank(bob);
         organism.redeem(amount);
         assertGe(organism.floor(), quote);

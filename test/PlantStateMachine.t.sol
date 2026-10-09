@@ -15,8 +15,16 @@ contract PlantStateMachineHandler is Test {
     address[3] public actors;
     uint32[3] public cells = [uint32(10223579), uint32(10354651), uint32(10420186)];
     uint256[3][3] public stake;
-    // Per-holder stake retained since the last successful settle. New deposits do not vote yet.
+    // Per-holder stake whose park day has settled. Later deposits wait, day by day, in order.
     uint256[3][3] public committed;
+
+    struct Deposit {
+        uint32 day;
+        uint256 amount;
+    }
+
+    mapping(uint256 => Deposit[]) internal pendingOf;
+    mapping(uint256 => uint256) internal pendingHead;
     uint256 public donated;
     uint256 public advanced;
     uint256 public fees;
@@ -110,7 +118,28 @@ contract PlantStateMachineHandler is Test {
         vm.prank(actors[a]);
         organism.park(cells[c], amount);
         stake[c][a] += amount;
+        Deposit[] storage list = pendingOf[c * 3 + a];
+        uint32 day = organism.today();
+        if (list.length != 0 && list[list.length - 1].day == day) list[list.length - 1].amount += amount;
+        else list.push(Deposit(day, amount));
         _observe();
+    }
+
+    /// @dev Park day T is eligible once day T has settled; nothing before the first full day after bind.
+    function _matureThrough() private view returns (uint32) {
+        uint32 last = organism.lastSettledDay();
+        return last > organism.bindDay() ? last : organism.bindDay() - 1;
+    }
+
+    function _promote(uint256 c, uint256 a) private {
+        Deposit[] storage list = pendingOf[c * 3 + a];
+        uint256 head = pendingHead[c * 3 + a];
+        uint32 through = _matureThrough();
+        while (head < list.length && list[head].day <= through) {
+            committed[c][a] += list[head].amount;
+            ++head;
+        }
+        pendingHead[c * 3 + a] = head;
     }
 
     function unpark(uint8 actorSeed, uint8 cellSeed, uint96 seed) public {
@@ -122,8 +151,19 @@ contract PlantStateMachineHandler is Test {
         vm.prank(actors[a]);
         organism.unpark(cells[c], amount);
         stake[c][a] -= amount;
-        // Withdraw fresh deposits first; a withdrawn commitment cannot be restored by redepositing.
-        if (committed[c][a] > stake[c][a]) committed[c][a] = stake[c][a];
+        // Withdraw fresh deposits first, newest day first; a withdrawn commitment cannot be
+        // restored by redepositing.
+        _promote(c, a);
+        Deposit[] storage list = pendingOf[c * 3 + a];
+        uint256 remaining = amount;
+        while (remaining != 0 && list.length > pendingHead[c * 3 + a]) {
+            Deposit storage last = list[list.length - 1];
+            uint256 take = remaining < last.amount ? remaining : last.amount;
+            last.amount -= take;
+            remaining -= take;
+            if (last.amount == 0) list.pop();
+        }
+        committed[c][a] -= remaining;
         assertEq(plant.balanceOf(actors[a]), beforeBalance + amount, "unpark must return exact stake");
         _observe();
     }
@@ -145,6 +185,12 @@ contract PlantStateMachineHandler is Test {
         uint256 beforeBalance = imd.balanceOf(who);
         uint256 quote = amount * organism.floor() / 1e18;
         if (!organism.isDead()) quote = quote * 9 / 10;
+        if (quote == 0) {
+            vm.prank(who);
+            vm.expectRevert(PlantOrganism.InvalidAmount.selector);
+            organism.redeem(amount);
+            return;
+        }
         vm.prank(who);
         uint256 payout = organism.redeem(amount);
         assertEq(payout, quote, "redemption differs from advertised floor");
@@ -246,11 +292,6 @@ contract PlantStateMachineHandler is Test {
                     _committedStake(destination), _committedStake(beforeLocation), "move used uncommitted majority"
                 );
             }
-            for (uint256 c; c < 3; ++c) {
-                for (uint256 a; a < 3; ++a) {
-                    committed[c][a] = stake[c][a];
-                }
-            }
         }
         _observe();
     }
@@ -259,12 +300,19 @@ contract PlantStateMachineHandler is Test {
         return (3000 ether - surrendered + 19) / 20;
     }
 
-    function _committedStake(uint32 cell) private view returns (uint256) {
+    function _committedStake(uint32 cell) private view returns (uint256 sum) {
         if (cell == 0) return 0;
+        uint32 through = _matureThrough();
         for (uint256 c; c < 3; ++c) {
-            if (cells[c] == cell) {
-                return committed[c][0] + committed[c][1] + committed[c][2];
+            if (cells[c] != cell) continue;
+            for (uint256 a; a < 3; ++a) {
+                sum += committed[c][a];
+                Deposit[] storage list = pendingOf[c * 3 + a];
+                for (uint256 i = pendingHead[c * 3 + a]; i < list.length && list[i].day <= through; ++i) {
+                    sum += list[i].amount;
+                }
             }
+            return sum;
         }
         revert("untracked cell");
     }

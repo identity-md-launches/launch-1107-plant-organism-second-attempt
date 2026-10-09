@@ -173,6 +173,9 @@ contract PlantVotingCommitmentTest is PlantTestBase {
         _deliver(0, 0, true);
         organism.settle();
         assertEq(organism.location(), ORIGIN_CELL);
+        // Carol parked on day START+3, after day START+2 had ended: eligible from day START+4.
+        assertEq(organism.votingStake(OTHER), 0);
+        _weather(0, 0);
         assertEq(organism.votingStake(OTHER), 100 ether);
     }
 

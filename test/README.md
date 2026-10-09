@@ -28,6 +28,11 @@ withdrawals, repaired challengers, and retries that cannot mature fresh stake. T
 rule activates deposits only after a successful settle, including the first epoch after bind.
 `PlantVotingCommitment.t.sol` covers loans at both heartbeat and settlement, decoy candidates,
 veto attempts, withdrawal/redeposit, and the five-percent threshold using retained commitments.
+`PlantSettleLag.t.sol` covers settlement that lags the calendar: stake parked after a day ended
+never earns or votes for that day, lag deposits mature one day at a time with exact shares,
+withdrawals leave newest first, bind-day deposits wait for the first full day, cold settles stay
+within 400k after a 28-day lag with daily deposits, an unlocked fee advance is not re-locked by
+the next heartbeat, zero-payout redemptions are refused, and `settle(day)` never overshoots.
 
 `PlantStateMachine.t.sol` drives twelve operations among three holders and three cells in random
 order, including separately requested, delivered, cleared, and settled oracle results. Every run

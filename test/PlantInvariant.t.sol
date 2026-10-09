@@ -73,8 +73,12 @@ contract PlantHandler is Test {
         address who = actors[actorSeed % 3];
         uint256 balance = plant.balanceOf(who);
         if (balance == 0) return;
+        uint256 amount = bound(amountSeed, 1, balance);
+        uint256 quote = amount * organism.floor() / 1e18;
+        if (!organism.isDead()) quote = quote * 9 / 10;
+        if (quote == 0) return; // Zero-payout redemptions are refused.
         vm.prank(who);
-        organism.redeem(bound(amountSeed, 1, balance));
+        organism.redeem(amount);
         _check();
     }
 
