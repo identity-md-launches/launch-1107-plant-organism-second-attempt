@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {OracleAttestation, OracleAttestationConsumer} from "./OracleAttestation.sol";
@@ -19,6 +20,7 @@ interface IPlantHook {
 contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    string public constant ORIGIN = "Sintra: Its gardens bring native and exotic trees together on forested hills.";
     uint256 public constant CHAIN_ID = 4663;
     uint256 public constant SCALE = 1e18;
     uint256 public constant ORACLE_TIMEOUT = 1 days;
@@ -26,12 +28,12 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     uint256 public constant DEATH_DAYS = 30;
     uint256 public constant SIGNER_GRACE = 30 days;
     bytes32 public constant ROTATE_TYPEHASH = keccak256(
-        "Rotate(address organism,uint256 chainId,address newSigner,address newIntake,bytes32 newAction,uint256 nonce)"
+        "Rotate(address organism,uint256 chainId,address newSigner,address newIntake,bytes32 newAction,uint256 nonce,uint256 deadline)"
     );
 
     IERC20 public immutable IMD;
     address public immutable deployer;
-    uint32 public immutable FALLBACK_CELL;
+    uint32 public immutable ORIGIN_CELL;
     IIntake public intake;
     bytes32 public action;
     address public hook;
@@ -42,7 +44,6 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     uint32 public challenger;
     uint32 public lastRewardCell;
     uint8 public water = 50;
-    uint8 public birthSettles;
     bool public dead;
     uint256 public backing;
     uint256 public burned;
@@ -115,6 +116,8 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     error InvalidAttestation();
     error InvalidWord();
     error InvalidNonce();
+    error RotationExpired();
+    error AdvanceTooLarge();
 
     event Bound(address indexed hook, address indexed plant, uint32 day);
     event Parked(address indexed holder, uint32 indexed cell, uint256 amount);
@@ -142,23 +145,18 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         address indexed oldSigner, address indexed newSigner, address indexed intake, bytes32 action, uint256 nonce
     );
 
-    constructor(
-        address imd_,
-        address intake_,
-        bytes32 action_,
-        address signer_,
-        uint32 fallbackCell_,
-        address deployer_
-    ) OracleAttestationConsumer(signer_) {
-        if (
-            imd_ == address(0) || intake_ == address(0) || action_ == bytes32(0) || deployer_ == address(0)
-                || signer_.code.length != 0
-        ) revert InvalidConfiguration();
-        WeatherQuestion.validate(fallbackCell_);
+    constructor(address imd_, address intake_, bytes32 action_, address signer_, uint32 originCell_, address deployer_)
+        OracleAttestationConsumer(signer_)
+    {
+        if (imd_ == address(0) || intake_ == address(0) || action_ == bytes32(0) || deployer_ == address(0)) {
+            revert InvalidConfiguration();
+        }
+        WeatherQuestion.validate(originCell_);
         IMD = IERC20(imd_);
         intake = IIntake(intake_);
         action = action_;
-        FALLBACK_CELL = fallbackCell_;
+        ORIGIN_CELL = originCell_;
+        location = originCell_;
         deployer = deployer_;
         lastSettledDay = today();
     }
@@ -226,7 +224,6 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     }
 
     function question() external view returns (string memory) {
-        if (location == 0) return "";
         return question(location, lastSettledDay + 1);
     }
 
@@ -281,17 +278,18 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         }
     }
 
-    function heartbeat() external nonReentrant returns (bytes32 id) {
+    function heartbeat(uint256 maxAdvance) external nonReentrant returns (bytes32 id) {
         _aliveBound();
         if (pending.exists) revert RequestPending();
         uint32 day = lastSettledDay + 1;
         if (day >= today()) revert DayNotEnded();
-        if (day < bindDay || location == 0) revert NoRequest();
+        if (day <= bindDay) revert NoRequest();
         if (block.timestamp < retryAt) revert RetryLater();
         uint256 price = intake.priceOf(action, address(IMD));
         uint256 available = spendablePot();
         if (price > available) {
             uint256 advance = price - available;
+            if (advance > maxAdvance) revert AdvanceTooLarge();
             _pullExact(IMD, msg.sender, advance);
             feeAdvances[msg.sender] += advance;
             feeAdvanceTotal += advance;
@@ -322,17 +320,7 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         if (!p.exists || p.received || requestId != p.requestId) revert UnknownRequest();
         if (msg.sender != p.intake) revert NotTheIntake();
         if (isDead()) revert DeadPlant();
-        // Preserve the canonical verifier byte-for-byte. With EOAs only and the reentrancy guard,
-        // temporarily selecting an unexpired previous signer cannot expose authority to a call.
-        address currentSigner = oracleSigner;
-        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(attestationDigest(a), sig);
-        if (
-            err == ECDSA.RecoverError.NoError && recovered != currentSigner && recovered != address(0)
-                && block.timestamp < signerAcceptedUntil[recovered]
-        ) oracleSigner = recovered;
-        if (oracleSigner.code.length != 0) revert BadSignature();
         _verifyAttestation(a, sig);
-        oracleSigner = currentSigner;
         if (
             a.chainId != CHAIN_ID || a.issuedAt < p.askedAt || a.panelSize < 15 || a.quorum < 10
                 || a.quorum > a.panelSize || a.agreed < a.quorum || a.agreed > a.panelSize || a.answer.length != 32
@@ -356,10 +344,11 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         if (!pending.exists) revert NoRequest();
         if (pending.received) {
             if ((uint256(pending.word) & (uint256(1) << 48)) != 0) revert NotTimedOut();
-            _settle();
+            _settle(false);
         } else {
             if (block.timestamp < uint256(pending.askedAt) + ORACLE_TIMEOUT) revert NotTimedOut();
-            _clear();
+            if (isDead()) _clear();
+            else _settle(true);
         }
     }
 
@@ -372,54 +361,44 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
     }
 
     function settle() external nonReentrant {
-        _settle();
+        _settle(false);
     }
 
     function settle(uint32 day) external nonReentrant {
         if (day != lastSettledDay + 1) revert WrongDay();
-        _settle();
+        _settle(false);
     }
 
-    function _settle() private {
+    function _settle(bool timedOut) private {
         uint32 day = lastSettledDay + 1;
         if (day >= today()) revert DayNotEnded();
-        if (hook == address(0) || day < bindDay) {
-            uint32 end = hook == address(0) ? today() - 1 : uint32(Math.min(today() - 1, bindDay - 1));
+        if (hook == address(0) || day <= bindDay) {
+            uint32 end = hook == address(0) ? today() - 1 : uint32(Math.min(today() - 1, bindDay));
             lastSettledDay = end;
             emit EmptyCatchUp(day, end);
             return;
         }
         _aliveBound();
-        uint32 candidate = challenger;
-        bytes32 word;
-        address caller;
+        if (!pending.received && !timedOut) revert NoResult();
+        Pending memory p = pending;
+        if (p.day != day) revert WrongDay();
+        uint32 candidate = p.challenger;
+        bytes32 word = timedOut ? bytes32(uint256(day) << 96) : p.word;
+        address caller = p.caller;
         uint256 pool;
         uint256 sips;
-        if (location != 0) {
-            if (!pending.received) revert NoResult();
-            Pending memory p = pending;
-            if (p.day != day) revert WrongDay();
-            candidate = p.challenger;
-            word = p.word;
-            caller = p.caller;
-            if ((uint256(word) & (uint256(1) << 48)) == 0) {
-                uint8 count = ++incompletes[day];
-                emit Incomplete(day, count);
-                _clear();
-                if (count < 3) return;
-            } else {
-                (sips, pool) = _hours(uint256(word));
-                delete pending;
-            }
+        if ((uint256(word) & (uint256(1) << 48)) == 0) {
+            uint8 count = ++incompletes[day];
+            emit Incomplete(day, count);
+            _clear();
+            if (count < 3) return;
+        } else {
+            (sips, pool) = _hours(uint256(word));
+            delete pending;
         }
         uint32 oldCell = location;
         _distribute(oldCell, pool);
         if (!_read(candidate) && challenger != candidate) _read(challenger);
-        if (oldCell == 0 && location == 0 && ++birthSettles == 3) {
-            location = FALLBACK_CELL;
-            challenger = 0;
-            emit Moved(0, location);
-        }
         lastSettledDay = day;
         ++epoch;
         retryAt = 0;
@@ -450,9 +429,10 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         water = uint8(wet);
     }
 
-    /// @notice Weather-day power is stake retained since the previous settle; birth uses live stake.
+    /// @notice stake[cell] = PLANT parked since the previous successful settle.
+    /// New parks count from the next settle; unparked stake drops out immediately.
+    /// Nomination, READ, its 5% threshold and the gardener pool all use this rule.
     function votingStake(uint32 cell) public view returns (uint256) {
-        if (location == 0) return parkedTotal[cell];
         CellRewards storage c = cellRewards[cell];
         // Mirror _rollCell without writing. Queued deposits mature only after a successful
         // settle advances epoch; withdrawals already remove active stake in unpark.
@@ -466,7 +446,7 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         uint256 currentStake = votingStake(current);
         if (
             candidate != 0 && candidate != current && candidateStake > currentStake
-                && candidateStake >= Math.ceilDiv(PLANT.totalSupply(), 20)
+                && candidateStake >= Math.ceilDiv(PLANT.totalSupply() - burned, 20)
         ) {
             location = candidate;
             challenger = 0;
@@ -493,10 +473,11 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         CellRewards storage c = cellRewards[cell];
         if (pool == 0) return;
         uint256 oldReserve = gardenerReserve();
-        if (c.active != 0) {
-            uint256 delta = Math.mulDiv(pool, SCALE, c.active);
+        uint256 stake = votingStake(cell);
+        if (stake != 0) {
+            uint256 delta = Math.mulDiv(pool, SCALE, stake);
             c.rewardPerToken += delta;
-            gardenerPoints += delta * c.active;
+            gardenerPoints += delta * stake;
         }
         uint256 reserved = gardenerReserve() - oldReserve;
         backing += pool - reserved;
@@ -606,28 +587,36 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         }
     }
 
-    function rotationDigest(address newSigner, address newIntake, bytes32 newAction, uint256 nonce)
+    function rotationDigest(address newSigner, address newIntake, bytes32 newAction, uint256 nonce, uint256 deadline)
         public
         view
         returns (bytes32)
     {
         return _hashTypedDataV4(
-            keccak256(abi.encode(ROTATE_TYPEHASH, address(this), block.chainid, newSigner, newIntake, newAction, nonce))
+            keccak256(
+                abi.encode(
+                    ROTATE_TYPEHASH, address(this), block.chainid, newSigner, newIntake, newAction, nonce, deadline
+                )
+            )
         );
     }
 
-    function rotate(address newSigner, address newIntake, bytes32 newAction, uint256 nonce, bytes calldata sig)
-        external
-        nonReentrant
-    {
-        if (
-            newSigner == address(0) || newSigner.code.length != 0 || newIntake.code.length == 0
-                || newAction == bytes32(0)
-        ) revert InvalidConfiguration();
+    function rotate(
+        address newSigner,
+        address newIntake,
+        bytes32 newAction,
+        uint256 nonce,
+        uint256 deadline,
+        bytes calldata sig
+    ) external nonReentrant {
+        if (newSigner == address(0) || newIntake.code.length == 0 || newAction == bytes32(0)) {
+            revert InvalidConfiguration();
+        }
         if (nonce != rotationNonce) revert InvalidNonce();
-        (address recovered, ECDSA.RecoverError err,) =
-            ECDSA.tryRecoverCalldata(rotationDigest(newSigner, newIntake, newAction, nonce), sig);
-        if (err != ECDSA.RecoverError.NoError || recovered != oracleSigner) revert BadSignature();
+        if (block.timestamp > deadline) revert RotationExpired();
+        if (!SignatureChecker.isValidSignatureNowCalldata(
+                oracleSigner, rotationDigest(newSigner, newIntake, newAction, nonce, deadline), sig
+            )) revert BadSignature();
         address oldSigner = oracleSigner;
         signerAcceptedUntil[oldSigner] = block.timestamp + SIGNER_GRACE;
         ++rotationNonce;
@@ -635,6 +624,21 @@ contract PlantOrganism is OracleAttestationConsumer, ReentrancyGuard {
         intake = IIntake(newIntake);
         action = newAction;
         emit Rotated(oldSigner, newSigner, newIntake, newAction, nonce);
+    }
+
+    /// @dev Raw signatures retain EOA compatibility. A previous contract signer is identified by
+    /// abi.encodePacked(signer, signature); lookup is bounded even after many rotations.
+    function _isValidAttestationSignature(bytes32 digest, bytes calldata sig) internal view override returns (bool) {
+        if (SignatureChecker.isValidSignatureNowCalldata(oracleSigner, digest, sig)) return true;
+        (address recovered, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(digest, sig);
+        if (err == ECDSA.RecoverError.NoError && _graceSignature(recovered, digest, sig)) return true;
+        if (sig.length >= 20) return _graceSignature(address(bytes20(sig[:20])), digest, sig[20:]);
+        return false;
+    }
+
+    function _graceSignature(address signer, bytes32 digest, bytes calldata sig) private view returns (bool) {
+        return block.timestamp < signerAcceptedUntil[signer]
+            && SignatureChecker.isValidSignatureNowCalldata(signer, digest, sig);
     }
 
     function _pullExact(IERC20 token, address from, uint256 amount) private {

@@ -9,7 +9,7 @@ forge test --offline --fuzz-seed 0x20261008 --fuzz-runs 2000
 forge fmt --check
 ```
 
-`PlantOrganism.t.sol` covers binding, birth/fallback, bounded catch-up, challenger selection,
+`PlantOrganism.t.sol` covers binding, deployment origin, bounded catch-up, challenger selection,
 hour ordering, water limits, reward activation, redemptions, oracle fees, failure paths,
 reentrancy, final death, and signer rotation. `WeatherQuestion.t.sol` compares literal JSON
 bodies, signed cell coordinates, leap days, and boundary dates. The canonical protocol
@@ -25,7 +25,7 @@ zero/overdraw inputs, lifecycle events, and repeated park/unpark round trips.
 
 `PlantVotingRevision.t.sol` covers committed voting ties, repeated deposits during a request,
 withdrawals, repaired challengers, and retries that cannot mature fresh stake. The accepted voting
-revision activates deposits only after a successful settle; birth uses live stake.
+rule activates deposits only after a successful settle, including the first epoch after bind.
 `PlantVotingCommitment.t.sol` covers loans at both heartbeat and settlement, decoy candidates,
 veto attempts, withdrawal/redeposit, and the five-percent threshold using retained commitments.
 
@@ -52,4 +52,6 @@ No fork, FFI, RPC, environment mutation, production keys, or new dependency is r
 Mock token supply is fixed after each invariant's setup; the mocks model exact-transfer ERC-20s,
 rejected transfers, transfer fees, and reentrancy. Live Robinhood IMD/Intake behavior and the future
 PLANT/hook deployment remain integration checks outside this offline suite. All signer secrets
-used here are synthetic test fixtures. No production source or configuration is changed.
+used here are synthetic test fixtures. Production build configuration and dependencies are unchanged.
+
+`PlantLaunchRevision.t.sol`, `PlantAssumptions.t.sol` and `PlantContractSigner.t.sol` cover the launch corrections: real origin and centre round-trip, first full post-bind day, first-epoch flash deposits, unanswered/mixed strikes, remaining-supply threshold, fee caps, signed rotation expiry, ERC-1271 validity/revocation, and overlapping signer grace. The state machine models settlement from both delivered results and the third timeout.

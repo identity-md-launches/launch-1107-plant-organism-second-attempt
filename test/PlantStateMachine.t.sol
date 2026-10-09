@@ -54,6 +54,8 @@ contract PlantStateMachineHandler is Test {
         donate(3 ether);
         park(0, 0, 200 ether);
         vm.warp(uint256(organism.lastSettledDay() + 2) * 1 days);
+        request(0);
+        answer(0, 0, true);
         settle();
         vm.warp(vm.getBlockTimestamp() + 1 days);
         request(0);
@@ -170,12 +172,12 @@ contract PlantStateMachineHandler is Test {
     }
 
     function request(uint8 actorSeed) public {
-        if (organism.isDead() || organism.location() == 0 || _pending().exists) return;
+        if (organism.isDead() || _pending().exists) return;
         if (organism.lastSettledDay() + 1 >= organism.today() || block.timestamp < organism.retryAt()) return;
         address who = actors[actorSeed % 3];
         uint256 beforeBalance = imd.balanceOf(who);
         vm.prank(who);
-        organism.heartbeat();
+        organism.heartbeat(type(uint256).max);
         advanced += beforeBalance - imd.balanceOf(who);
         fees += intake.price();
         ++requests;
@@ -214,33 +216,36 @@ contract PlantStateMachineHandler is Test {
 
     function settle() public {
         if (organism.isDead() || organism.lastSettledDay() + 1 >= organism.today()) return;
-        if (organism.location() != 0 && !_pending().received) return;
+        if (!_pending().received) return;
+        _finish(false);
+    }
+
+    // Both a delivered result and the third timeout can advance the same ghost ledger.
+    function _finish(bool timeout) private {
         uint256 beforeBalance = _paidToActors();
         uint256 beforeDay = organism.lastSettledDay();
         uint32 beforeLocation = organism.location();
         uint32 capturedCandidate = _pending().challenger;
         uint32 liveCandidate = organism.challenger();
         uint32 expectedLocation = beforeLocation;
-        if (beforeLocation != 0) {
-            if (_canMove(capturedCandidate, beforeLocation)) expectedLocation = capturedCandidate;
-            else if (_canMove(liveCandidate, beforeLocation)) expectedLocation = liveCandidate;
-        }
-        organism.settle();
+        if (_canMove(capturedCandidate, beforeLocation)) expectedLocation = capturedCandidate;
+        else if (_canMove(liveCandidate, beforeLocation)) expectedLocation = liveCandidate;
+        if (timeout) organism.clearPending();
+        else organism.settle();
         paid += _paidToActors() - beforeBalance;
         if (organism.lastSettledDay() > beforeDay) {
             ++settlements;
             uint32 destination = organism.location();
-            if (beforeLocation != 0) assertEq(destination, expectedLocation, "READ differs from retained votes");
-            if (beforeLocation != 0 && destination != beforeLocation) {
+            assertEq(destination, expectedLocation, "READ differs from retained votes");
+            if (destination != beforeLocation) {
                 assertTrue(
                     destination == capturedCandidate || destination == liveCandidate, "move used an unnominated cell"
                 );
-                assertGe(_committedStake(destination), 150 ether, "move used uncommitted quorum");
+                assertGe(_committedStake(destination), _threshold(), "move used uncommitted quorum");
                 assertGt(
                     _committedStake(destination), _committedStake(beforeLocation), "move used uncommitted majority"
                 );
             }
-            // Promotion is tied to settlement, never to requests, callbacks, or timeout clears.
             for (uint256 c; c < 3; ++c) {
                 for (uint256 a; a < 3; ++a) {
                     committed[c][a] = stake[c][a];
@@ -248,6 +253,10 @@ contract PlantStateMachineHandler is Test {
             }
         }
         _observe();
+    }
+
+    function _threshold() private view returns (uint256) {
+        return (3000 ether - surrendered + 19) / 20;
     }
 
     function _committedStake(uint32 cell) private view returns (uint256) {
@@ -261,7 +270,7 @@ contract PlantStateMachineHandler is Test {
     }
 
     function _canMove(uint32 candidate, uint32 current) private view returns (bool) {
-        return candidate != 0 && candidate != current && _committedStake(candidate) >= 150 ether
+        return candidate != 0 && candidate != current && _committedStake(candidate) >= _threshold()
             && _committedStake(candidate) > _committedStake(current);
     }
 
@@ -269,7 +278,7 @@ contract PlantStateMachineHandler is Test {
         PlantOrganism.Pending memory p = _pending();
         // Incomplete results use settle(), and complete results cannot be discarded.
         if (!p.exists || p.received || block.timestamp < uint256(p.askedAt) + 1 days) return;
-        organism.clearPending();
+        _finish(true);
         ++clears;
         _observe();
     }
@@ -309,7 +318,7 @@ contract PlantStateMachineHandler is Test {
             assertEq(organism.parkedTotal(cells[c]), cellSum, "cell aggregation");
             assertEq(
                 organism.votingStake(cells[c]),
-                organism.location() == 0 ? cellSum : _committedStake(cells[c]),
+                _committedStake(cells[c]),
                 "vote differs from each holder's retained commitment"
             );
             allParked += cellSum;

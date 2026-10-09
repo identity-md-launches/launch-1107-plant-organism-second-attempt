@@ -8,7 +8,7 @@ import {MockToken, MockHook, MockIntake} from "./mocks/Mocks.sol";
 
 contract PlantAdversarialTest is PlantTestBase {
     function test_callbackAndSettlementEventsDescribeTheAppliedResult() public {
-        _birth();
+        _withGardeners();
         bytes32 intakeId = _ask();
         OracleAttestation.Attestation memory a = _attestation(1, 0, true);
         bytes32 word = abi.decode(a.answer, (bytes32));
@@ -23,7 +23,7 @@ contract PlantAdversarialTest is PlantTestBase {
         uint256 pool = sip / 3;
         uint256 reserved = pool / 100 * 100;
         vm.expectEmit(true, false, false, true, address(organism));
-        emit PlantOrganism.Settled(START + 2, word, sip, sip - reserved, 49, LISBON);
+        emit PlantOrganism.Settled(START + 2, word, sip, sip - reserved, 49, ORIGIN_CELL);
         organism.settle();
     }
 
@@ -42,7 +42,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_rejectedResultCanBeCorrectedWithoutBurningRequest() public {
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = _attestation(1, 0, true);
         a.answerType = 3;
@@ -60,7 +60,7 @@ contract PlantAdversarialTest is PlantTestBase {
 
     /// forge-config: default.fuzz.runs = 1000
     function testFuzz_reservedWeatherBitsRejectedWithoutMutatingPending(uint8 seed) public {
-        _birth();
+        _withGardeners();
         _ask();
         // The defined regions are [0,48] and [96,127]. Exercise every other bit.
         uint256 bit = 49 + uint256(seed) % 175;
@@ -72,7 +72,7 @@ contract PlantAdversarialTest is PlantTestBase {
 
     /// forge-config: default.fuzz.runs = 1000
     function testFuzz_signedMalformedPanelsAreRejected(uint8 seed) public {
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = _attestation(0, 0, true);
         uint8 variant = seed % 5;
@@ -85,7 +85,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_answerMustBeExactlyOneWordIncludingTrailingData() public {
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = _attestation(0, 0, true);
         a.answer = bytes.concat(a.answer, hex"00");
@@ -95,7 +95,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_validityWindowBoundariesAndAskedAt() public {
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = _attestation(0, 0, true);
         a.issuedAt -= 1;
@@ -115,7 +115,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_exactClockDriftToleranceAccepted() public {
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = _attestation(0, 0, true);
         a.issuedAt += 300;
@@ -124,7 +124,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_consumedOracleUuidCannotBeReusedForSameDayRetry() public {
-        _birth();
+        _withGardeners();
         bytes32 oldIntakeId = _ask();
         OracleAttestation.Attestation memory a = _attestation(0, 0, false);
         (bool ok,,) = intake.deliver(oldIntakeId, a, _sign(a));
@@ -146,7 +146,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_timeoutExactSecondAndOldResultCannotPoisonReask() public {
-        _birth();
+        _withGardeners();
         bytes32 oldId = _ask();
         uint256 deadline = uint256(_pending().askedAt) + 1 days;
         vm.warp(deadline - 1);
@@ -167,7 +167,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_twoKeepersAdvancesSurviveTimeoutAndOnlyUnlockOnSettlement() public {
-        _birth();
+        _withGardeners();
         intake.setPrice(1002 ether);
         uint256 firstBalance = imd.balanceOf(keeper);
         _ask(); // uses 1000 pot + 2 from keeper
@@ -177,7 +177,7 @@ contract PlantAdversarialTest is PlantTestBase {
         imd.mint(bob, 1002 ether);
         vm.startPrank(bob);
         imd.approve(address(organism), 1002 ether);
-        organism.heartbeat();
+        organism.heartbeat(type(uint256).max);
         vm.stopPrank();
         assertEq(organism.feeAdvances(keeper), 2 ether);
         assertEq(organism.feeAdvances(bob), 1002 ether);
@@ -198,7 +198,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_deferredAdvanceAndBountyRemainClaimableExactlyOnce() public {
-        _birth();
+        _withGardeners();
         intake.setPrice(1002 ether);
         _ask();
         imd.mint(address(organism), 102 ether);
@@ -221,7 +221,7 @@ contract PlantAdversarialTest is PlantTestBase {
 
     function test_thirdIncompleteReadsCandidateFromLatestRequest() public {
         _park(alice, THIRD, 200 ether);
-        _birthWithCommittedCandidate(250 ether);
+        _withCommittedCandidate(250 ether);
         for (uint256 i; i < 2; ++i) {
             _ask();
             assertEq(_pending().challenger, OTHER);
@@ -245,12 +245,12 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_depositAfterAskMustMatureBeforeItCanChallenge() public {
-        _birth();
+        _withGardeners();
         _ask();
         _park(bob, OTHER, 150 ether);
         _deliver(0, 0, true);
         organism.settle();
-        assertEq(organism.location(), LISBON);
+        assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.challenger(), 0);
         organism.challenge(OTHER);
         assertEq(organism.challenger(), OTHER);
@@ -260,7 +260,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_moveRewardsDepartingCellAndNeverIncomingCellForSameDay() public {
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         _weather(1, 0);
         assertEq(organism.location(), OTHER);
         vm.prank(bob);
@@ -280,11 +280,11 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_unparkAfterCallbackDropsOutBeforeHoursAndKeepsPreviousReward() public {
-        _birth();
+        _withGardeners();
         _weather(1, 0);
         _ask();
         _deliver(1, 0, true);
-        _unpark(alice, LISBON, 100 ether);
+        _unpark(alice, ORIGIN_CELL, 100 ether);
         uint256 accrued = organism.credits(alice);
         assertGt(accrued, 0);
         uint256 beforeBacking = organism.backing();
@@ -298,19 +298,21 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_moveThresholdRoundsUpWhenSupplyNotDivisibleByTwenty() public {
-        plant.mint(carol, 1); // total supply = 1000e18 + 1, threshold = 50e18 + 1
-        _park(alice, LISBON, 50 ether);
-        _nextEnded();
-        organism.settle();
-        assertEq(organism.location(), 0);
-        _park(alice, LISBON, 1);
-        _nextEnded();
-        organism.settle();
-        assertEq(organism.location(), LISBON);
+        plant.mint(carol, 1); // remaining supply = 1000e18 + 1, threshold = 50e18 + 1
+        _park(alice, OTHER, 50 ether);
+        _activationDay();
+        organism.challenge(OTHER);
+        _weather(0, 0);
+        assertEq(organism.location(), ORIGIN_CELL);
+        _park(alice, OTHER, 1);
+        _weather(0, 0); // Fresh stake cannot meet the threshold yet.
+        assertEq(organism.location(), ORIGIN_CELL);
+        _weather(0, 0);
+        assertEq(organism.location(), OTHER);
     }
 
     function test_deathClearsPendingAndPreservesGardenersAndFeeDebt() public {
-        _birth();
+        _withGardeners();
         _weather(1, 0);
         uint256 gardenerReserve = organism.gardenerReserve();
         intake.setPrice(organism.spendablePot() + 2 ether);
@@ -325,7 +327,7 @@ contract PlantAdversarialTest is PlantTestBase {
         assertFalse(_pending().exists);
         assertEq(organism.gardenerReserve(), gardenerReserve);
         assertEq(organism.feeAdvances(keeper), 2 ether);
-        _unpark(alice, LISBON, 100 ether);
+        _unpark(alice, ORIGIN_CELL, 100 ether);
         vm.prank(alice);
         organism.claim();
         assertGt(imd.balanceOf(alice), 0);
@@ -336,7 +338,7 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_rotatedIntakeCannotAnswerPreviousIntakesRequest() public {
-        _birth();
+        _withGardeners();
         bytes32 id = _ask();
         MockIntake next = new MockIntake();
         address signer = vm.addr(91234);
@@ -346,7 +348,8 @@ contract PlantAdversarialTest is PlantTestBase {
             address(next),
             nextAction,
             0,
-            _signDigest(KEY, organism.rotationDigest(signer, address(next), nextAction, 0))
+            type(uint256).max,
+            _signDigest(KEY, organism.rotationDigest(signer, address(next), nextAction, 0, type(uint256).max))
         );
         OracleAttestation.Attestation memory a = _attestation(0, 0, true);
         bytes memory sig = _signDigest(91234, organism.attestationDigest(a));
@@ -379,14 +382,14 @@ contract PlantAdversarialTest is PlantTestBase {
     }
 
     function test_zeroAmountsAndOverdrawCannotChangeCustody() public {
-        _birth();
+        _withGardeners();
         vm.startPrank(alice);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
-        organism.park(LISBON, 0);
+        organism.park(ORIGIN_CELL, 0);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
-        organism.unpark(LISBON, 0);
+        organism.unpark(ORIGIN_CELL, 0);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
-        organism.unpark(LISBON, 100 ether + 1);
+        organism.unpark(ORIGIN_CELL, 100 ether + 1);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
         organism.redeem(0);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
@@ -394,8 +397,8 @@ contract PlantAdversarialTest is PlantTestBase {
         vm.stopPrank();
         vm.prank(bob);
         vm.expectRevert(PlantOrganism.InvalidAmount.selector);
-        organism.unpark(LISBON, 1);
-        assertEq(organism.parked(LISBON, alice), 100 ether);
+        organism.unpark(ORIGIN_CELL, 1);
+        assertEq(organism.parked(ORIGIN_CELL, alice), 100 ether);
         assertEq(plant.balanceOf(address(organism)), 100 ether);
         assertEq(organism.burned(), 0);
     }

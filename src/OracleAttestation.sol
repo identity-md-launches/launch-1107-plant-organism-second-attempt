@@ -159,9 +159,19 @@ abstract contract OracleAttestationConsumer is EIP712 {
         if (block.timestamp > a.expiresAt) revert AttestationExpired(a.expiresAt);
         // forge-lint: disable-next-line(block-timestamp)
         if (a.issuedAt > block.timestamp + ISSUED_AT_TOLERANCE) revert AttestationNotYetValid(a.issuedAt);
-        if (!SignatureChecker.isValidSignatureNowCalldata(oracleSigner, attestationDigest(a), signature)) {
+        if (!_isValidAttestationSignature(attestationDigest(a), signature)) {
             revert BadSignature();
         }
+    }
+
+    /// @dev Applications may extend accepted signers without changing the canonical validity checks.
+    function _isValidAttestationSignature(bytes32 digest, bytes calldata signature)
+        internal
+        view
+        virtual
+        returns (bool)
+    {
+        return SignatureChecker.isValidSignatureNowCalldata(oracleSigner, digest, signature);
     }
 
     /// @notice Marks a request id as acted on, once.

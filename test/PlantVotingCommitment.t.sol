@@ -25,7 +25,7 @@ contract VotingBorrower {
     function askWithLoan(uint32 cell, uint256 amount) external {
         plant.transferFrom(lender, address(this), amount);
         organism.park(cell, amount);
-        organism.heartbeat();
+        organism.heartbeat(type(uint256).max);
         organism.unpark(cell, amount);
         plant.transfer(lender, amount);
     }
@@ -61,7 +61,7 @@ contract PlantVotingCommitmentTest is PlantTestBase {
     }
 
     function _doubleFlashMove() internal {
-        _birth();
+        _withGardeners();
         _seedBorrower();
         _weather(0, 0);
         _weather(0, 0);
@@ -79,7 +79,7 @@ contract PlantVotingCommitmentTest is PlantTestBase {
 
     function test_borrowingAtBothHeartbeatAndSettleCannotMove() public {
         _doubleFlashMove();
-        assertEq(organism.location(), LISBON, "two atomic loans moved the plant");
+        assertEq(organism.location(), ORIGIN_CELL, "two atomic loans moved the plant");
         _conservation();
     }
 
@@ -96,7 +96,7 @@ contract PlantVotingCommitmentTest is PlantTestBase {
     }
 
     function test_rearmedDecoyCannotHideHoldersCandidate() public {
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         _nextEnded();
         borrower.askWithLoan(THIRD, 201 ether);
         (,, uint32 captured,,,,,,) = organism.pending();
@@ -113,21 +113,21 @@ contract PlantVotingCommitmentTest is PlantTestBase {
     }
 
     function test_borrowingAtBothHeartbeatAndSettleCannotVeto() public {
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         _nextEnded();
         uint256 lenderBefore = plant.balanceOf(alice);
-        borrower.askWithLoan(LISBON, 201 ether);
-        assertEq(organism.votingStake(LISBON), 100 ether);
+        borrower.askWithLoan(ORIGIN_CELL, 201 ether);
+        assertEq(organism.votingStake(ORIGIN_CELL), 100 ether);
         _deliver(0, 0, true);
-        borrower.settleWithLoan(LISBON, 201 ether);
+        borrower.settleWithLoan(ORIGIN_CELL, 201 ether);
         assertEq(organism.location(), OTHER);
         assertEq(plant.balanceOf(alice), lenderBefore);
-        assertEq(organism.parkedTotal(LISBON), 100 ether);
+        assertEq(organism.parkedTotal(ORIGIN_CELL), 100 ether);
         _conservation();
     }
 
     function test_loanAcrossPreviousSettleLosesPowerOnWithdrawal() public {
-        _birth();
+        _withGardeners();
         _seedBorrower();
         _ask();
         _deliver(0, 0, true);
@@ -137,14 +137,14 @@ contract PlantVotingCommitmentTest is PlantTestBase {
         borrower.askWithLoan(OTHER, 100 ether);
         _deliver(0, 0, true);
         borrower.settleWithLoan(OTHER, 100 ether);
-        assertEq(organism.location(), LISBON);
+        assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.votingStake(OTHER), 1);
         _conservation();
     }
 
     function test_thresholdUsesCommittedStakeAndNewDepositsMatureAtSettle() public {
-        _birth();
-        _unpark(alice, LISBON, 100 ether);
+        _withGardeners();
+        _unpark(alice, ORIGIN_CELL, 100 ether);
         _park(bob, OTHER, 40 ether);
         assertEq(organism.votingStake(OTHER), 0);
         assertEq(organism.challenger(), 0);
@@ -154,14 +154,14 @@ contract PlantVotingCommitmentTest is PlantTestBase {
         _park(bob, OTHER, 10 ether);
         assertEq(organism.votingStake(OTHER), 40 ether);
         _weather(0, 0);
-        assertEq(organism.location(), LISBON, "fresh stake counted toward 5% threshold");
+        assertEq(organism.location(), ORIGIN_CELL, "fresh stake counted toward 5% threshold");
         assertEq(organism.votingStake(OTHER), 50 ether);
         _weather(0, 0);
         assertEq(organism.location(), OTHER);
     }
 
     function test_timeoutAndReaskCannotRestoreWithdrawnPower() public {
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         _ask();
         _unpark(bob, OTHER, 200 ether);
         _park(carol, OTHER, 100 ether);
@@ -172,12 +172,12 @@ contract PlantVotingCommitmentTest is PlantTestBase {
         assertEq(organism.votingStake(OTHER), 0);
         _deliver(0, 0, true);
         organism.settle();
-        assertEq(organism.location(), LISBON);
+        assertEq(organism.location(), ORIGIN_CELL);
         assertEq(organism.votingStake(OTHER), 100 ether);
     }
 
     function testFuzz_withdrawalAndRedepositCannotIncreasePower(uint96 withdrawalSeed, uint96 additionSeed) public {
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         uint256 amount = bound(uint256(withdrawalSeed), 1, 200 ether);
         uint256 addition = bound(uint256(additionSeed), 0, 100 ether);
         _unpark(bob, OTHER, amount);
@@ -189,7 +189,7 @@ contract PlantVotingCommitmentTest is PlantTestBase {
         assertEq(organism.votingStake(OTHER), 200 ether - amount);
         _deliver(0, 0, true);
         organism.settle();
-        assertEq(organism.location(), amount < 100 ether ? OTHER : LISBON);
+        assertEq(organism.location(), amount < 100 ether ? OTHER : ORIGIN_CELL);
         assertEq(organism.votingStake(OTHER), 200 ether + addition);
         _conservation();
     }

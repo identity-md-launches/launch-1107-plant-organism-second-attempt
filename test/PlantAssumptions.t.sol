@@ -7,37 +7,47 @@ import {MockIntake} from "./mocks/Mocks.sol";
 
 contract PlantAssumptionsTest is PlantTestBase {
     function test_explicitZeroCellQuestionRemainsInvalid() public {
-        uint32 cell = organism.location();
+        uint32 cell = 0;
         uint32 day = organism.lastSettledDay() + 1;
         vm.expectRevert(WeatherQuestion.InvalidCell.selector);
         organism.question(cell, day);
     }
 
-    function test_timeoutsDoNotCountAndEventuallyDie() public {
-        _birthWithCommittedCandidate(300 ether);
-        for (uint256 i; i < 23; ++i) {
+    function test_threeSilentRequestsSettleEmptyAndMoveWithRetainedStake() public {
+        _withCommittedCandidate(300 ether);
+        uint256 oldEpoch = organism.epoch();
+        for (uint256 i; i < 3; ++i) {
             _ask();
             vm.warp(vm.getBlockTimestamp() + 1 days);
             organism.clearPending();
-            vm.warp(vm.getBlockTimestamp() + 6 hours);
+            assertEq(organism.incompletes(START + 2), i + 1);
+            assertEq(organism.epoch(), oldEpoch + (i == 2 ? 1 : 0));
+            if (i < 2) vm.warp(organism.retryAt());
         }
-        assertTrue(organism.isDead());
-        assertEq(organism.incompletes(START + 2), 0);
-        assertEq(organism.location(), LISBON);
+        assertFalse(organism.isDead());
+        assertEq(organism.lastSettledDay(), START + 2);
+        assertEq(organism.location(), OTHER);
+        assertEq(organism.water(), 50);
+        assertEq(organism.backing(), 0);
+        assertEq(organism.retryAt(), 0);
+        _conservation();
     }
 
-    function test_oldRotationSignatureAccepted() public {
+    function test_oldRotationSignatureExpires() public {
         MockIntake next = new MockIntake();
-        bytes memory sig = _signDigest(KEY, organism.rotationDigest(vm.addr(555), address(next), ACTION, 0));
+        uint256 deadline = vm.getBlockTimestamp() + 1 days;
+        bytes memory sig = _signDigest(KEY, organism.rotationDigest(vm.addr(555), address(next), ACTION, 0, deadline));
         vm.warp(vm.getBlockTimestamp() + 400 days);
-        organism.rotate(vm.addr(555), address(next), ACTION, 0, sig);
-        assertEq(organism.oracleSigner(), vm.addr(555));
+        vm.expectRevert(PlantOrganism.RotationExpired.selector);
+        organism.rotate(vm.addr(555), address(next), ACTION, 0, deadline, sig);
+        assertEq(organism.oracleSigner(), vm.addr(KEY));
+        assertEq(organism.rotationNonce(), 0);
     }
 
-    function test_redeemedSupplyStillCountsInThreshold() public {
-        _birth();
+    function test_redeemedSupplyIsExcludedFromThreshold() public {
+        _withGardeners();
         _weather(1, 0);
-        _unpark(alice, LISBON, 100 ether);
+        _unpark(alice, ORIGIN_CELL, 100 ether);
         vm.prank(alice);
         organism.redeem(600 ether);
         vm.prank(bob);
@@ -45,35 +55,46 @@ contract PlantAssumptionsTest is PlantTestBase {
         vm.prank(carol);
         organism.redeem(60 ether);
         _park(carol, OTHER, 40 ether);
-        _weather(0, 0); // Mature the stake so the next READ exercises the supply threshold.
+        _weather(0, 0);
         organism.challenge(OTHER);
         assertEq(organism.votingStake(OTHER), 40 ether);
-        assertEq(organism.votingStake(LISBON), 0);
+        assertEq(organism.votingStake(ORIGIN_CELL), 0);
         _weather(0, 0);
         assertEq(organism.burned(), 960 ether);
-        assertEq(organism.location(), LISBON);
+        assertEq(organism.location(), OTHER);
     }
 
-    function test_rotatedIntakeCanPriceAbovePotAndPullAdvance() public {
-        _birth();
+    function test_rotatedIntakeCannotPullAboveKeeperCap() public {
         MockIntake next = new MockIntake();
         next.setPrice(10000 ether);
-        bytes memory sig = _signDigest(KEY, organism.rotationDigest(vm.addr(555), address(next), ACTION, 0));
-        organism.rotate(vm.addr(555), address(next), ACTION, 0, sig);
+        uint256 deadline = vm.getBlockTimestamp() + 3 days;
+        bytes memory sig = _signDigest(KEY, organism.rotationDigest(vm.addr(555), address(next), ACTION, 0, deadline));
+        organism.rotate(vm.addr(555), address(next), ACTION, 0, deadline, sig);
         imd.mint(keeper, 10000 ether);
-        uint256 before = imd.balanceOf(keeper);
-        _ask();
-        assertEq(imd.balanceOf(address(next)), 10000 ether);
-        assertEq(before - imd.balanceOf(keeper), 9000 ether);
+        uint256 beforeBalance = imd.balanceOf(keeper);
+        _nextEnded();
+        vm.expectRevert(PlantOrganism.AdvanceTooLarge.selector);
+        vm.prank(keeper);
+        organism.heartbeat(0);
+        assertEq(imd.balanceOf(keeper), beforeBalance);
+        assertEq(organism.feeAdvances(keeper), 0);
+        assertEq(next.sequence(), 0);
+        vm.expectRevert(PlantOrganism.AdvanceTooLarge.selector);
+        vm.prank(keeper);
+        organism.heartbeat(9000 ether - 1);
+        vm.prank(keeper);
+        organism.heartbeat(9000 ether);
+        assertEq(beforeBalance - imd.balanceOf(keeper), 9000 ether);
         assertEq(organism.feeAdvances(keeper), 9000 ether);
+        _conservation();
     }
 
     function test_oldSourceWindowBacklogIsAlreadyDead() public {
-        _birth();
+        _withGardeners();
         vm.warp(uint256(START + 101) * 1 days);
         assertTrue(organism.isDead());
         vm.expectRevert(PlantOrganism.DeadPlant.selector);
-        organism.heartbeat();
+        organism.heartbeat(type(uint256).max);
     }
 
     function test_preBindDonationsHaveNoExit() public {

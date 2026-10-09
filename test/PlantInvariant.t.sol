@@ -95,8 +95,8 @@ contract PlantHandler is Test {
 
     function weather(uint24 sun, uint24 rain) external {
         vm.warp(uint256(organism.lastSettledDay() + 2) * 1 days);
-        if (organism.location() != 0) {
-            bytes32 id = organism.heartbeat();
+        {
+            bytes32 id = organism.heartbeat(type(uint256).max);
             OracleAttestation.Attestation memory a;
             a.requestId = keccak256(abi.encode(++serial));
             a.chainId = 4663;

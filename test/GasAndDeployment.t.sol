@@ -4,17 +4,18 @@ pragma solidity 0.8.26;
 import {PlantTestBase} from "./PlantOrganism.t.sol";
 import {PlantOrganism} from "../src/PlantOrganism.sol";
 import {OracleAttestation} from "../src/OracleAttestation.sol";
+import {MockHook} from "./mocks/Mocks.sol";
 
 contract GasAndDeploymentTest is PlantTestBase {
     function test_settlementFitsStipendWithManyEligibleHolders() public {
-        _birth();
+        _withGardeners();
         for (uint256 i; i < 128; ++i) {
             address holder = address(uint160(0x10000 + i));
             vm.prank(bob);
             plant.transfer(holder, 1 ether);
             vm.startPrank(holder);
             plant.approve(address(organism), 1 ether);
-            organism.park(LISBON, 1 ether);
+            organism.park(ORIGIN_CELL, 1 ether);
             vm.stopPrank();
         }
         _weather(0, 0); // Activate every newly parked holder for the following settle.
@@ -41,16 +42,25 @@ contract GasAndDeploymentTest is PlantTestBase {
     }
 
     function test_requestedStaticConstructorAndForbiddenOpcodes() public {
+        vm.prank(bob); // Factory caller differs from the launch owner.
         PlantOrganism liveConfig = new PlantOrganism(
             0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127,
             0x1397434cd35e8a9C8aC312A61D3A285EB31dea56,
             ACTION,
             0x5598Aa9146215Bc13eb26f2c692Ad1461Fd32982,
-            LISBON,
-            address(this)
+            ORIGIN_CELL,
+            alice
         );
-        assertEq(liveConfig.deployer(), address(this));
-        assertEq(liveConfig.FALLBACK_CELL(), LISBON);
+        assertEq(liveConfig.deployer(), alice);
+        assertEq(liveConfig.location(), ORIGIN_CELL);
+        assertLe(type(PlantOrganism).creationCode.length + 6 * 32, 49152);
+        MockHook futureHook = new MockHook(address(liveConfig), address(plant));
+        vm.expectRevert(PlantOrganism.NotDeployer.selector);
+        vm.prank(bob);
+        liveConfig.bind(address(futureHook));
+        vm.prank(alice);
+        liveConfig.bind(address(futureHook));
+        assertEq(liveConfig.ORIGIN_CELL(), ORIGIN_CELL);
         assertEq(liveConfig.lastSettledDay(), START);
         assertEq(liveConfig.action(), ACTION);
         bytes memory code = address(liveConfig).code;
@@ -67,8 +77,8 @@ contract GasAndDeploymentTest is PlantTestBase {
 
     function test_coldCallbackAndMaxHoursMoveSettleGas() public {
         vm.record();
-        _birthWithCommittedCandidate(201 ether);
-        _park(carol, LISBON, 100 ether);
+        _withCommittedCandidate(201 ether);
+        _park(carol, ORIGIN_CELL, 100 ether);
         _ask();
         OracleAttestation.Attestation memory a = _attestation(0xffffff, 0, true);
         bytes memory sig = _sign(a);
@@ -85,7 +95,7 @@ contract GasAndDeploymentTest is PlantTestBase {
 
     function test_thirdIncompleteMoveAndAdvancePaymentGas() public {
         vm.record();
-        _birthWithCommittedCandidate(201 ether);
+        _withCommittedCandidate(201 ether);
         intake.setPrice(1001 ether);
         imd.mint(keeper, 10000 ether);
         for (uint256 i; i < 3; ++i) {
@@ -108,7 +118,7 @@ contract GasAndDeploymentTest is PlantTestBase {
     function test_coldMaxHoursWithRepairedCandidateSettleGas() public {
         vm.record();
         _park(alice, THIRD, 201 ether);
-        _birthWithCommittedCandidate(200 ether);
+        _withCommittedCandidate(200 ether);
         organism.challenge(THIRD);
         _ask();
         _unpark(alice, THIRD, 201 ether);
@@ -119,5 +129,28 @@ contract GasAndDeploymentTest is PlantTestBase {
         _cool(address(plant));
         _settleWithinGasLimit();
         assertEq(organism.location(), OTHER);
+    }
+
+    function test_thirdTimeoutMoveAndAdvancePaymentFitsColdStipend() public {
+        vm.record();
+        _withCommittedCandidate(201 ether);
+        intake.setPrice(1001 ether);
+        imd.mint(keeper, 10000 ether);
+        for (uint256 i; i < 3; ++i) {
+            _ask();
+            vm.warp(vm.getBlockTimestamp() + 1 days);
+            if (i < 2) {
+                organism.clearPending();
+                vm.warp(organism.retryAt());
+            }
+        }
+        imd.mint(address(organism), 4000 ether);
+        _cool(address(organism));
+        _cool(address(imd));
+        _cool(address(plant));
+        (bool ok,) = address(organism).call{gas: 400000}(abi.encodeCall(organism.clearPending, ()));
+        assertTrue(ok, "third timeout must settle within 400k");
+        assertEq(organism.location(), OTHER);
+        assertEq(organism.feeAdvances(keeper), 0);
     }
 }

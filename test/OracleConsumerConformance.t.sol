@@ -44,7 +44,7 @@ contract OracleConsumerConformanceTest is PlantTestBase {
         vm.warp(ISSUED_AT);
         deployCodeTo(
             "PlantOrganism.sol:PlantOrganism",
-            abi.encode(address(imd), address(intake), ACTION, SIGNER, LISBON, address(this)),
+            abi.encode(address(imd), address(intake), ACTION, SIGNER, ORIGIN_CELL, address(this)),
             VECTOR_CONSUMER
         );
         organism = PlantOrganism(VECTOR_CONSUMER);
@@ -95,7 +95,7 @@ contract OracleConsumerConformanceTest is PlantTestBase {
         organism.bind(address(new MockHook(address(organism), address(plant))));
         _approve(alice);
         imd.mint(address(organism), 100 ether);
-        _birth();
+        _withGardeners();
         _ask();
         OracleAttestation.Attestation memory a = vector();
         a.chainId = 4663;

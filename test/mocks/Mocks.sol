@@ -123,7 +123,9 @@ contract MockIntake is IIntake {
         callback = cb;
         id = keccak256(abi.encode(address(this), ++sequence));
         lastId = id;
-        if (reenter) (reentrySucceeded,) = msg.sender.call(abi.encodeWithSignature("heartbeat()"));
+        if (reenter) {
+            (reentrySucceeded,) = msg.sender.call(abi.encodeWithSignature("heartbeat(uint256)", type(uint256).max));
+        }
     }
 
     function deliver(bytes32 id, OracleAttestation.Attestation calldata a, bytes calldata sig)
