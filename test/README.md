@@ -78,4 +78,27 @@ rejected transfers, transfer fees, and reentrancy. Live Robinhood IMD/Intake beh
 PLANT/hook deployment remain integration checks outside this offline suite. All signer secrets
 used here are synthetic test fixtures. Production build configuration and dependencies are unchanged.
 
+`PlantOriginRegression.t.sol` pins the structure of the no-birth revision: the birth selectors
+(`FALLBACK_CELL`, `birthSettles`) and every admin, upgrade, pause, ownership and role selector are
+absent and plain value is refused; `ORIGIN` is one sentence of the form `<place>: <why>` matching
+launch.json and README.md; a 1,000-case fuzz packs every valid quarter-degree cell, prints its
+centre through the question's own coordinate text, parses it back and floors it to the same cell,
+including both edges; the constructor accepts every valid cell as the deployment location with an
+unspecialised `question()` and rejects every invalid cell and zero dependency; PLANT sent straight
+to the body or merely held in a wallet never votes, nominates, defends or earns; a single
+transaction that parks, nominates, asks, delivers, settles and withdraws can neither move the plant
+nor earn gardening credit, at the destination or at the location; a rotation deadline is part of
+the signed struct and expires one second late; and the heartbeat cap is exact with no pending
+request left behind by a refusal.
+
+`PlantStakeRuleInvariant.t.sol` keeps an independent ledger of dated deposits per holder and cell,
+written from the launch's one stake rule (parked by a day that has settled, withdrawn drops out at
+once, never a live balance), without reading the body's positions, batches or activation
+checkpoints. Across 200 sequences of 64 calls mixing parks, withdrawals, nominations, complete
+days, three-strike silent days and same-call flashes by a holder richer than all gardeners, it
+asserts after every call that `votingStake` equals the ledger for every cell, that nomination and
+READ (including the silent-day READ and the live-challenger fallback, with the 5% threshold over
+remaining supply) follow the ledger, that a gardener pool with no settled stake reserves nothing,
+that the flasher never holds stake or credit, and that PLANT custody equals parked plus burned.
+
 `PlantLaunchRevision.t.sol`, `PlantAssumptions.t.sol` and `PlantContractSigner.t.sol` cover the launch corrections: real origin and centre round-trip, first full post-bind day, first-epoch flash deposits, unanswered/mixed strikes, remaining-supply threshold, fee caps, signed rotation expiry, ERC-1271 validity/revocation, and overlapping signer grace. The state machine models settlement from both delivered results and the third timeout.
